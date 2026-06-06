@@ -1,4 +1,4 @@
-import { PrismaClient, UserRole, VehicleStatus, EmergencyLevel } from '@prisma/client';
+import { PrismaClient, UserRole, VehicleStatus } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
@@ -8,6 +8,7 @@ async function main() {
 
   const hashedPassword = await bcrypt.hash('123456', 12);
 
+  console.log('1/7: 创建用户...');
   const admin = await prisma.user.upsert({
     where: { username: 'admin' },
     update: {},
@@ -88,8 +89,7 @@ async function main() {
     },
   });
 
-  console.log('用户数据已创建');
-
+  console.log('2/7: 创建急救站...');
   const station1 = await prisma.emergencyStation.upsert({
     where: { code: 'ST001' },
     update: {},
@@ -116,8 +116,7 @@ async function main() {
     },
   });
 
-  console.log('急救站数据已创建');
-
+  console.log('3/7: 创建急救小组...');
   const team1 = await prisma.emergencyTeam.upsert({
     where: { code: 'TM001' },
     update: {},
@@ -138,21 +137,11 @@ async function main() {
     },
   });
 
-  console.log('急救小组数据已创建');
+  await prisma.user.update({ where: { id: dispatcher.id }, data: { stationId: station1.id } });
+  await prisma.user.update({ where: { id: paramedic1.id }, data: { stationId: station1.id, teamId: team1.id } });
+  await prisma.user.update({ where: { id: paramedic2.id }, data: { stationId: station1.id, teamId: team1.id } });
 
-  await prisma.user.update({
-    where: { id: paramedic1.id },
-    data: { stationId: station1.id, teamId: team1.id },
-  });
-  await prisma.user.update({
-    where: { id: paramedic2.id },
-    data: { stationId: station1.id, teamId: team1.id },
-  });
-  await prisma.user.update({
-    where: { id: dispatcher.id },
-    data: { stationId: station1.id },
-  });
-
+  console.log('4/7: 创建车辆...');
   const vehicle1 = await prisma.vehicle.upsert({
     where: { plateNumber: '京A12001' },
     update: {},
@@ -197,17 +186,7 @@ async function main() {
     },
   });
 
-  await prisma.emergencyTeam.update({
-    where: { id: team1.id },
-    data: { currentVehicleId: vehicle1.id },
-  });
-  await prisma.emergencyTeam.update({
-    where: { id: team2.id },
-    data: { currentVehicleId: vehicle2.id },
-  });
-
-  console.log('车辆数据已创建');
-
+  console.log('5/7: 创建医院...');
   const hospital1 = await prisma.hospital.upsert({
     where: { id: 'hosp1' },
     update: {},
@@ -265,14 +244,8 @@ async function main() {
     },
   });
 
-  await prisma.user.update({
-    where: { id: doctor1.id },
-    data: { hospitalId: hospital1.id },
-  });
-  await prisma.user.update({
-    where: { id: hospitalStaff.id },
-    data: { hospitalId: hospital1.id },
-  });
+  await prisma.user.update({ where: { id: doctor1.id }, data: { hospitalId: hospital1.id } });
+  await prisma.user.update({ where: { id: hospitalStaff.id }, data: { hospitalId: hospital1.id } });
 
   await prisma.hospitalDepartment.createMany({
     data: [
@@ -288,8 +261,7 @@ async function main() {
     skipDuplicates: true,
   });
 
-  console.log('医院数据已创建');
-
+  console.log('6/7: 创建医疗物资...');
   const supplies = [
     { name: '肾上腺素注射液', category: '急救药品', unit: '支', safetyStock: 10, defaultQuantityPerVehicle: 20 },
     { name: '阿托品注射液', category: '急救药品', unit: '支', safetyStock: 10, defaultQuantityPerVehicle: 15 },
@@ -314,6 +286,7 @@ async function main() {
     });
   }
 
+  console.log('7/7: 分配车辆物资库存...');
   const allSupplies = await prisma.medicalSupply.findMany();
   const allVehicles = await prisma.vehicle.findMany();
 
@@ -337,19 +310,31 @@ async function main() {
     }
   }
 
-  console.log('物资数据已创建');
-
   console.log(`
-    ============================================
-    数据播种完成！
-    ============================================
-    测试账户信息（密码均为 123456）：
-    - 管理员: admin / 123456
-    - 调度员: dispatcher / 123456
-    - 急救人员: paramedic1 / 123456, paramedic2 / 123456
-    - 医生: doctor1 / 123456
-    - 医院工作人员: hospstaff / 123456
-    ============================================
+╔═══════════════════════════════════════════════════════╗
+║               ✅ 数据播种完成！                         ║
+╠═══════════════════════════════════════════════════════╣
+║                                                       ║
+║  测试账户（密码均为 123456）：                          ║
+║  ┌─────────────────────────────────────────────────┐  ║
+║  │  admin         → 系统管理员 (全部权限)           │  ║
+║  │  dispatcher    → 张调度 (接警派单)               │  ║
+║  │  paramedic1    → 李急救 (出车处置)               │  ║
+║  │  paramedic2    → 王医生 (出车处置)               │  ║
+║  │  doctor1       → 赵主任 (接收预警/病历)          │  ║
+║  │  hospstaff     → 孙护士 (更新医院负荷)           │  ║
+║  └─────────────────────────────────────────────────┘  ║
+║                                                       ║
+║  已创建数据：                                           ║
+║    • 用户: 6个                                         ║
+║    • 急救站: 2个                                       ║
+║    • 急救小组: 2个                                     ║
+║    • 救护车: 3辆                                       ║
+║    • 医院: 3家（含14个科室）                           ║
+║    • 医疗物资: 13种                                    ║
+║    • 车辆物资库存: 39条                                ║
+║                                                       ║
+╚═══════════════════════════════════════════════════════╝
   `);
 }
 

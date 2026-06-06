@@ -69,20 +69,26 @@ enum SupplyRequestStatus {
 }
 
 model User {
-  id              String   @id @default(cuid())
-  username        String   @unique
+  id              String            @id @default(cuid())
+  username        String            @unique
   passwordHash    String
   fullName        String
   role            UserRole
   phone           String?
-  email           String?  @unique
+  email           String?           @unique
   stationId       String?
   teamId          String?
   hospitalId      String?
   department      String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  isActive        Boolean  @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  isActive        Boolean           @default(true)
+
+  dispatchesAsDispatcher Dispatch[] @relation("DispatcherDispatches")
+  dispatchesAsDoctor     Dispatch[] @relation("DoctorDispatches")
+  alertRecipients        AlertRecipient[]
+  requestedSupplies      SupplyRequest[] @relation("RequestedByUser")
+  approvedSupplies       SupplyRequest[] @relation("ApprovedByUser")
 }
 
 model EmergencyStation {
@@ -104,6 +110,8 @@ model EmergencyTeam {
   stationId     String
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  dispatches    Dispatch[]
 }
 
 model Vehicle {
@@ -120,6 +128,10 @@ model Vehicle {
   fuelLevel       Float    @default(100)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  dispatches      Dispatch[]
+  supplies        VehicleSupply[]
+  supplyRequests  SupplyRequest[]
 }
 
 model Hospital {
@@ -138,6 +150,10 @@ model Hospital {
   specialties     String[]
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  departments     HospitalDepartment[]
+  recommendedDispatches Dispatch[] @relation("RecommendedHospital")
+  actualDispatches      Dispatch[] @relation("ActualHospital")
 }
 
 model HospitalDepartment {
@@ -148,6 +164,8 @@ model HospitalDepartment {
   available     Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  hospital      Hospital  @relation(fields: [hospitalId], references: [id])
 }
 
 model EmergencyCall {
@@ -168,6 +186,9 @@ model EmergencyCall {
   notes           String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  dispatch        Dispatch?
+  patient         Patient?
 }
 
 model Dispatch {
@@ -191,6 +212,19 @@ model Dispatch {
   dispatchNotes   String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  call            EmergencyCall @relation(fields: [callId], references: [id])
+  dispatcher      User         @relation("DispatcherDispatches", fields: [dispatcherId], references: [id])
+  vehicle         Vehicle      @relation(fields: [vehicleId], references: [id])
+  assignedTeam    EmergencyTeam? @relation(fields: [assignedTeamId], references: [id])
+  assignedDoctor  User?        @relation("DoctorDispatches", fields: [assignedDoctorId], references: [id])
+  recommendedHospital Hospital? @relation("RecommendedHospital", fields: [recommendedHospitalId], references: [id])
+  actualHospital      Hospital? @relation("ActualHospital", fields: [actualHospitalId], references: [id])
+  patient         Patient?
+  vitalSigns      VitalSign[]
+  medicalRecord   MedicalRecord?
+  suppliesUsed    DispatchSupplyUsage[]
+  alerts          Alert[]
 }
 
 model Patient {
@@ -207,6 +241,9 @@ model Patient {
   currentMedications String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  call            EmergencyCall @relation(fields: [callId], references: [id])
+  dispatch        Dispatch?     @relation(fields: [dispatchId], references: [id])
 }
 
 model VitalSign {
@@ -224,6 +261,9 @@ model VitalSign {
   isAbnormal      Boolean  @default(false)
   notes           String?
   createdAt       DateTime @default(now())
+
+  dispatch        Dispatch @relation(fields: [dispatchId], references: [id])
+  alerts          Alert[]
 }
 
 model Alert {
@@ -239,6 +279,10 @@ model Alert {
   resolvedAt      DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  dispatch        Dispatch?   @relation(fields: [dispatchId], references: [id])
+  vitalSign       VitalSign?  @relation(fields: [vitalSignId], references: [id])
+  recipients      AlertRecipient[]
 }
 
 model AlertRecipient {
@@ -247,6 +291,9 @@ model AlertRecipient {
   userId          String
   readAt          DateTime?
   notifiedAt      DateTime @default(now())
+
+  alert           Alert  @relation(fields: [alertId], references: [id])
+  user            User   @relation(fields: [userId], references: [id])
 
   @@unique([alertId, userId])
 }
@@ -270,6 +317,8 @@ model MedicalRecord {
   syncedAt        DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  dispatch        Dispatch @relation(fields: [dispatchId], references: [id])
 }
 
 model MedicalSupply {
@@ -281,6 +330,10 @@ model MedicalSupply {
   defaultQuantityPerVehicle Float
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  vehicleStocks   VehicleSupply[]
+  usageRecords    DispatchSupplyUsage[]
+  supplyRequestItems  SupplyRequestItem[]
 }
 
 model VehicleSupply {
@@ -292,6 +345,9 @@ model VehicleSupply {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  vehicle         Vehicle       @relation(fields: [vehicleId], references: [id])
+  supply          MedicalSupply @relation(fields: [supplyId], references: [id])
+
   @@unique([vehicleId, supplyId])
 }
 
@@ -302,6 +358,9 @@ model DispatchSupplyUsage {
   quantityUsed    Float
   notes           String?
   createdAt       DateTime @default(now())
+
+  dispatch        Dispatch      @relation(fields: [dispatchId], references: [id])
+  supply          MedicalSupply @relation(fields: [supplyId], references: [id])
 }
 
 model SupplyRequest {
@@ -317,6 +376,11 @@ model SupplyRequest {
   fulfilledAt     DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  vehicle         Vehicle  @relation(fields: [vehicleId], references: [id])
+  requestedBy     User     @relation("RequestedByUser", fields: [requestedById], references: [id])
+  approvedBy      User?    @relation("ApprovedByUser", fields: [approvedById], references: [id])
+  items           SupplyRequestItem[]
 }
 
 model SupplyRequestItem {
@@ -325,6 +389,9 @@ model SupplyRequestItem {
   supplyId        String
   requestedQuantity Float
   fulfilledQuantity Float?
+
+  request         SupplyRequest @relation(fields: [requestId], references: [id])
+  supply          MedicalSupply @relation(fields: [supplyId], references: [id])
 }
 
 model QualityReport {
