@@ -3,7 +3,7 @@ import asyncHandler from 'express-async-handler';
 import prisma from '../config/prisma';
 import { AppError } from '../middleware/errorHandler';
 import { wsService } from '../services/websocket';
-import { VehicleStatus } from '@prisma/client';
+import { VehicleStatus } from '../utils/enums';
 
 export const listVehicles = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
@@ -15,23 +15,39 @@ export const listVehicles = asyncHandler(
 
     const vehicles = await prisma.vehicle.findMany({
       where,
-      include: {
-        station: { select: { id: true, name: true } },
-        currentTeam: {
-          include: {
-            members: { select: { id: true, fullName: true, role: true } },
-          },
-        },
-        currentDispatch: {
-          include: { call: true },
-        },
-      },
       orderBy: { plateNumber: 'asc' },
     });
 
+    const enrichedVehicles = await Promise.all(
+      vehicles.map(async (v) => {
+        const station = v.stationId
+          ? await prisma.emergencyStation.findUnique({ where: { id: v.stationId }, select: { id: true, name: true } })
+          : null;
+        const currentDispatch = v.currentDispatchId
+          ? await prisma.dispatch.findUnique({ where: { id: v.currentDispatchId } })
+          : null;
+        const call = currentDispatch?.callId
+          ? await prisma.emergencyCall.findUnique({ where: { id: currentDispatch.callId } })
+          : null;
+        return {
+          ...v,
+          station,
+          currentTeam: null,
+          currentDispatch: currentDispatch
+            ? {
+                ...currentDispatch,
+                call: call
+                  ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+                  : null,
+              }
+            : null,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { vehicles },
+      data: { vehicles: enrichedVehicles },
     });
   }
 );
@@ -42,30 +58,49 @@ export const getVehicle = asyncHandler(
 
     const vehicle = await prisma.vehicle.findUnique({
       where: { id },
-      include: {
-        station: true,
-        currentTeam: {
-          include: {
-            members: { select: { id: true, fullName: true, role: true, phone: true } },
-          },
-        },
-        currentDispatch: {
-          include: {
-            call: true,
-            patient: true,
-            recommendedHospital: true,
-          },
-        },
-      },
     });
 
     if (!vehicle) {
       return next(new AppError('车辆不存在', 404));
     }
 
+    const station = vehicle.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: vehicle.stationId } })
+      : null;
+    const currentDispatch = vehicle.currentDispatchId
+      ? await prisma.dispatch.findUnique({ where: { id: vehicle.currentDispatchId } })
+      : null;
+    const call = currentDispatch?.callId
+      ? await prisma.emergencyCall.findUnique({ where: { id: currentDispatch.callId } })
+      : null;
+    const patient = currentDispatch?.id
+      ? await prisma.patient.findUnique({ where: { dispatchId: currentDispatch.id } })
+      : null;
+    const recommendedHospital = currentDispatch?.recommendedHospitalId
+      ? await prisma.hospital.findUnique({ where: { id: currentDispatch.recommendedHospitalId } })
+      : null;
+
+    const enrichedVehicle = {
+      ...vehicle,
+      station,
+      currentTeam: null,
+      currentDispatch: currentDispatch
+        ? {
+            ...currentDispatch,
+            call: call
+              ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+              : null,
+            patient,
+            recommendedHospital: recommendedHospital
+              ? { ...recommendedHospital, specialties: JSON.parse(recommendedHospital.specialties || '[]') }
+              : null,
+          }
+        : null,
+    };
+
     res.status(200).json({
       status: 'success',
-      data: { vehicle },
+      data: { vehicle: enrichedVehicle },
     });
   }
 );
@@ -102,8 +137,9 @@ export const createVehicle = asyncHandler(
         currentLatitude: station.latitude,
         currentLongitude: station.longitude,
       },
-      include: { station: true },
     });
+
+    const enrichedVehicle = { ...vehicle, station };
 
     const supplies = await prisma.medicalSupply.findMany();
     if (supplies.length > 0) {
@@ -119,7 +155,7 @@ export const createVehicle = asyncHandler(
 
     res.status(201).json({
       status: 'success',
-      data: { vehicle },
+      data: { vehicle: enrichedVehicle },
     });
   }
 );
@@ -151,19 +187,24 @@ export const updateVehicleLocation = asyncHandler(
     const updatedVehicle = await prisma.vehicle.update({
       where: { id },
       data: updateData,
-      include: { station: true },
     });
+
+    const station = updatedVehicle.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: updatedVehicle.stationId } })
+      : null;
+
+    const enrichedVehicle = { ...updatedVehicle, station };
 
     wsService.broadcastVehicleUpdate(id, {
       latitude: parseFloat(latitude),
       longitude: parseFloat(longitude),
-      status: updatedVehicle.status,
-      vehicle: updatedVehicle,
+      status: enrichedVehicle.status,
+      vehicle: enrichedVehicle,
     });
 
     res.status(200).json({
       status: 'success',
-      data: { vehicle: updatedVehicle },
+      data: { vehicle: enrichedVehicle },
     });
   }
 );
@@ -185,17 +226,22 @@ export const updateVehicleStatus = asyncHandler(
     const updatedVehicle = await prisma.vehicle.update({
       where: { id },
       data: { status: status as VehicleStatus },
-      include: { station: true },
     });
 
+    const station = updatedVehicle.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: updatedVehicle.stationId } })
+      : null;
+
+    const enrichedVehicle = { ...updatedVehicle, station };
+
     wsService.broadcastVehicleUpdate(id, {
-      status: updatedVehicle.status,
-      vehicle: updatedVehicle,
+      status: enrichedVehicle.status,
+      vehicle: enrichedVehicle,
     });
 
     res.status(200).json({
       status: 'success',
-      data: { vehicle: updatedVehicle },
+      data: { vehicle: enrichedVehicle },
     });
   }
 );
@@ -203,20 +249,28 @@ export const updateVehicleStatus = asyncHandler(
 export const listStations = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
     const stations = await prisma.emergencyStation.findMany({
-      include: {
-        teams: {
-          include: {
-            members: { select: { id: true, fullName: true, role: true } },
-          },
-        },
-        vehicles: true,
-      },
       orderBy: { name: 'asc' },
     });
 
+    const enrichedStations = await Promise.all(
+      stations.map(async (s) => {
+        const teams = await prisma.emergencyTeam.findMany({
+          where: { stationId: s.id },
+        });
+        const vehicles = await prisma.vehicle.findMany({
+          where: { stationId: s.id },
+        });
+        return {
+          ...s,
+          teams: teams.map((t) => ({ ...t, members: [], currentVehicle: null })),
+          vehicles,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { stations },
+      data: { stations: enrichedStations },
     });
   }
 );
@@ -230,17 +284,31 @@ export const listTeams = asyncHandler(
 
     const teams = await prisma.emergencyTeam.findMany({
       where,
-      include: {
-        station: { select: { id: true, name: true } },
-        members: { select: { id: true, fullName: true, role: true, phone: true } },
-        currentVehicle: { select: { id: true, plateNumber: true, status: true } },
-      },
       orderBy: { name: 'asc' },
     });
 
+    const enrichedTeams = await Promise.all(
+      teams.map(async (t) => {
+        const station = t.stationId
+          ? await prisma.emergencyStation.findUnique({ where: { id: t.stationId }, select: { id: true, name: true } })
+          : null;
+        const members = await prisma.user.findMany({
+          where: { teamId: t.id },
+          select: { id: true, fullName: true, role: true, phone: true },
+        });
+        const currentVehicle = null;
+        return {
+          ...t,
+          station,
+          members,
+          currentVehicle,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { teams },
+      data: { teams: enrichedTeams },
     });
   }
 );

@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import prisma from '../config/prisma';
 import { AppError } from '../middleware/errorHandler';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../utils/enums';
 
 const signToken = (id: string, role: UserRole) => {
   return jwt.sign(
@@ -26,7 +26,6 @@ export const login = asyncHandler(
 
     const user = await prisma.user.findUnique({
       where: { username },
-      include: { station: true, team: true, hospital: true },
     });
 
     if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
@@ -54,9 +53,9 @@ export const login = asyncHandler(
           teamId: user.teamId,
           hospitalId: user.hospitalId,
           department: user.department,
-          station: user.station,
-          team: user.team,
-          hospital: user.hospital,
+          station: null,
+          team: null,
+          hospital: null,
         },
       },
     });
@@ -118,7 +117,6 @@ export const getCurrentUser = asyncHandler(
 
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
-      include: { station: true, team: true, hospital: true },
     });
 
     if (!user) {
@@ -139,9 +137,9 @@ export const getCurrentUser = asyncHandler(
           teamId: user.teamId,
           hospitalId: user.hospitalId,
           department: user.department,
-          station: user.station,
-          team: user.team,
-          hospital: user.hospital,
+          station: null,
+          team: null,
+          hospital: null,
         },
       },
     });
@@ -160,7 +158,6 @@ export const listUsers = asyncHandler(
 
     const users = await prisma.user.findMany({
       where,
-      include: { station: true, team: true, hospital: true },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -179,9 +176,9 @@ export const listUsers = asyncHandler(
           hospitalId: u.hospitalId,
           department: u.department,
           isActive: u.isActive,
-          station: u.station,
-          team: u.team,
-          hospital: u.hospital,
+          station: null,
+          team: null,
+          hospital: null,
         })),
       },
     });

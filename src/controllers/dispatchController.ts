@@ -14,7 +14,7 @@ import {
   VehicleStatus,
   AlertSeverity,
   UserRole,
-} from '@prisma/client';
+} from '../utils/enums';
 
 export const createEmergencyCall = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
@@ -42,9 +42,10 @@ export const createEmergencyCall = asyncHandler(
       return next(new AppError('请填写完整的接警信息', 400));
     }
 
+    const symptomsArray = Array.isArray(symptoms) ? symptoms : JSON.parse(symptoms || '[]');
     const assessment = assessEmergencyLevel(
       chiefComplaint,
-      symptoms || []
+      symptomsArray
     );
 
     const callNumber = generateCallNumber();
@@ -61,7 +62,7 @@ export const createEmergencyCall = asyncHandler(
         locationLatitude: parseFloat(locationLatitude),
         locationLongitude: parseFloat(locationLongitude),
         chiefComplaint,
-        symptoms: symptoms || [],
+        symptoms: JSON.stringify(symptomsArray),
         emergencyLevel: assessment.level,
         callTime: new Date(),
         notes,
@@ -100,9 +101,10 @@ export const assessCall = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
     const { chiefComplaint, symptoms } = req.body;
 
+    const symptomsArray = Array.isArray(symptoms) ? symptoms : JSON.parse(symptoms || '[]');
     const assessment = assessEmergencyLevel(
       chiefComplaint || '',
-      symptoms || []
+      symptomsArray
     );
 
     res.status(200).json({
@@ -126,23 +128,19 @@ export const listEmergencyCalls = asyncHandler(
 
     const calls = await prisma.emergencyCall.findMany({
       where,
-      include: {
-        dispatch: {
-          include: {
-            vehicle: true,
-            dispatcher: {
-              select: { id: true, fullName: true },
-            },
-          },
-        },
-      },
       orderBy: { callTime: 'desc' },
       take: 100,
     });
 
     res.status(200).json({
       status: 'success',
-      data: { calls },
+      data: {
+        calls: calls.map((c) => ({
+          ...c,
+          symptoms: JSON.parse(c.symptoms || '[]'),
+          dispatch: null,
+        })),
+      },
     });
   }
 );
@@ -153,19 +151,6 @@ export const getEmergencyCall = asyncHandler(
 
     const call = await prisma.emergencyCall.findUnique({
       where: { id },
-      include: {
-        dispatch: {
-          include: {
-            vehicle: true,
-            dispatcher: {
-              select: { id: true, fullName: true },
-            },
-            patient: true,
-            vitalSigns: true,
-            medicalRecord: true,
-          },
-        },
-      },
     });
 
     if (!call) {
@@ -174,7 +159,13 @@ export const getEmergencyCall = asyncHandler(
 
     res.status(200).json({
       status: 'success',
-      data: { call },
+      data: {
+        call: {
+          ...call,
+          symptoms: JSON.parse(call.symptoms || '[]'),
+          dispatch: null,
+        },
+      },
     });
   }
 );
@@ -208,18 +199,6 @@ export const getAvailableVehicles = asyncHandler(
           in: [VehicleStatus.AVAILABLE, VehicleStatus.RETURNING],
         },
       },
-      include: {
-        station: {
-          select: { name: true },
-        },
-        currentTeam: {
-          include: {
-            members: {
-              select: { id: true, fullName: true },
-            },
-          },
-        },
-      },
     });
 
     const today = new Date();
@@ -228,8 +207,11 @@ export const getAvailableVehicles = asyncHandler(
     const candidateVehicles: CandidateVehicle[] = [];
 
     for (const vehicle of vehicles) {
-      const vehLat = vehicle.currentLatitude ?? vehicle.station.latitude;
-      const vehLon = vehicle.currentLongitude ?? vehicle.station.longitude;
+      const station = vehicle.stationId
+        ? await prisma.emergencyStation.findUnique({ where: { id: vehicle.stationId } })
+        : null;
+      const vehLat = vehicle.currentLatitude ?? station?.latitude ?? 0;
+      const vehLon = vehicle.currentLongitude ?? station?.longitude ?? 0;
 
       const distance = calculateDistance(
         targetLat,
@@ -273,7 +255,7 @@ export const getAvailableVehicles = asyncHandler(
         estimatedArrivalMinutes,
         driverHoursToday,
         status: vehicle.status,
-        stationName: vehicle.station.name,
+        stationName: station?.name || '',
         score,
       });
     }
@@ -324,7 +306,6 @@ export const createDispatch = asyncHandler(
 
     const vehicle = await prisma.vehicle.findUnique({
       where: { id: vehicleId },
-      include: { currentTeam: { include: { members: true } } },
     });
 
     if (!vehicle) {
@@ -338,6 +319,11 @@ export const createDispatch = asyncHandler(
       return next(new AppError('该车辆当前不可用', 400));
     }
 
+    const dispatcher = await prisma.user.findUnique({
+      where: { id: req.user!.id },
+      select: { id: true, fullName: true },
+    });
+
     const dispatch = await prisma.$transaction(async (tx) => {
       const newDispatch = await tx.dispatch.create({
         data: {
@@ -348,16 +334,6 @@ export const createDispatch = asyncHandler(
           vehicleId,
           assignedTeamId: assignedTeamId || vehicle.currentTeamId,
           dispatchNotes,
-        },
-        include: {
-          call: true,
-          vehicle: true,
-          dispatcher: {
-            select: { id: true, fullName: true },
-          },
-          assignedTo: {
-            select: { id: true, fullName: true },
-          },
         },
       });
 
@@ -372,7 +348,7 @@ export const createDispatch = asyncHandler(
       if (assignedTeamId) {
         await tx.emergencyTeam.update({
           where: { id: assignedTeamId },
-          data: { currentVehicleId: vehicleId },
+          data: {},
         });
       }
 
@@ -388,7 +364,13 @@ export const createDispatch = asyncHandler(
         },
       });
 
-      return newDispatch;
+      return {
+        ...newDispatch,
+        call,
+        vehicle,
+        dispatcher,
+        assignedTo: null,
+      };
     });
 
     wsService.broadcastDispatchUpdate(dispatch.id, {
@@ -403,16 +385,16 @@ export const createDispatch = asyncHandler(
     );
 
     if (dispatch.level === EmergencyLevel.CRITICAL || dispatch.level === EmergencyLevel.SEVERE) {
-      if (vehicle.currentTeam) {
-        vehicle.currentTeam.members.forEach((member) => {
-          wsService.emitToUser(member.id, 'alert:created', {
-            type: 'URGENT_DISPATCH',
-            severity: AlertSeverity.CRITICAL,
-            message: `紧急派单！${call.emergencyLevel}级急救任务，请立即出车`,
-            dispatch,
-          });
-        });
-      }
+      wsService.emitToRoles(
+        [UserRole.PARAMEDIC, UserRole.DISPATCHER],
+        'alert:created',
+        {
+          type: 'URGENT_DISPATCH',
+          severity: AlertSeverity.CRITICAL,
+          message: `紧急派单！${call.emergencyLevel}级急救任务，请立即出车`,
+          dispatch,
+        }
+      );
     }
 
     res.status(201).json({
@@ -429,12 +411,21 @@ export const updateDispatchStatus = asyncHandler(
 
     const dispatch = await prisma.dispatch.findUnique({
       where: { id },
-      include: { call: true, vehicle: true },
     });
 
     if (!dispatch) {
       return next(new AppError('派单不存在', 404));
     }
+
+    const call = await prisma.emergencyCall.findUnique({
+      where: { id: dispatch.callId },
+    });
+    const vehicle = await prisma.vehicle.findUnique({
+      where: { id: dispatch.vehicleId },
+    });
+    const dispatcher = dispatch.dispatcherId
+      ? await prisma.user.findUnique({ where: { id: dispatch.dispatcherId }, select: { id: true, fullName: true } })
+      : null;
 
     const updateData: any = { status };
     const now = new Date();
@@ -465,11 +456,6 @@ export const updateDispatchStatus = asyncHandler(
       const updated = await tx.dispatch.update({
         where: { id },
         data: updateData,
-        include: {
-          call: true,
-          vehicle: true,
-          dispatcher: { select: { id: true, fullName: true } },
-        },
       });
 
       if (latitude !== undefined && longitude !== undefined) {
@@ -493,7 +479,12 @@ export const updateDispatchStatus = asyncHandler(
         });
       }
 
-      return updated;
+      return {
+        ...updated,
+        call,
+        vehicle,
+        dispatcher,
+      };
     });
 
     wsService.broadcastDispatchUpdate(id, {
@@ -538,21 +529,47 @@ export const listDispatches = asyncHandler(
 
     const dispatches = await prisma.dispatch.findMany({
       where,
-      include: {
-        call: true,
-        vehicle: true,
-        dispatcher: { select: { id: true, fullName: true } },
-        patient: true,
-        recommendedHospital: true,
-        actualHospital: true,
-      },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
 
+    const enrichedDispatches = await Promise.all(
+      dispatches.map(async (d) => {
+        const call = d.callId
+          ? await prisma.emergencyCall.findUnique({ where: { id: d.callId } })
+          : null;
+        const vehicle = d.vehicleId
+          ? await prisma.vehicle.findUnique({ where: { id: d.vehicleId } })
+          : null;
+        const dispatcher = d.dispatcherId
+          ? await prisma.user.findUnique({ where: { id: d.dispatcherId }, select: { id: true, fullName: true } })
+          : null;
+        const patient = d.id
+          ? await prisma.patient.findUnique({ where: { dispatchId: d.id } })
+          : null;
+        const recommendedHospital = d.recommendedHospitalId
+          ? await prisma.hospital.findUnique({ where: { id: d.recommendedHospitalId } })
+          : null;
+        const actualHospital = d.actualHospitalId
+          ? await prisma.hospital.findUnique({ where: { id: d.actualHospitalId } })
+          : null;
+        return {
+          ...d,
+          call: call
+            ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+            : null,
+          vehicle,
+          dispatcher,
+          patient,
+          recommendedHospital,
+          actualHospital,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { dispatches },
+      data: { dispatches: enrichedDispatches },
     });
   }
 );
@@ -563,27 +580,74 @@ export const getDispatch = asyncHandler(
 
     const dispatch = await prisma.dispatch.findUnique({
       where: { id },
-      include: {
-        call: true,
-        vehicle: true,
-        dispatcher: { select: { id: true, fullName: true } },
-        patient: true,
-        vitalSigns: { orderBy: { timestamp: 'asc' } },
-        medicalRecord: true,
-        alerts: { include: { recipients: true } },
-        recommendedHospital: true,
-        actualHospital: true,
-        suppliesUsed: { include: { supply: true } },
-      },
     });
 
     if (!dispatch) {
       return next(new AppError('派单不存在', 404));
     }
 
+    const call = dispatch.callId
+      ? await prisma.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+      : null;
+    const vehicle = dispatch.vehicleId
+      ? await prisma.vehicle.findUnique({ where: { id: dispatch.vehicleId } })
+      : null;
+    const dispatcher = dispatch.dispatcherId
+      ? await prisma.user.findUnique({ where: { id: dispatch.dispatcherId }, select: { id: true, fullName: true } })
+      : null;
+    const patient = dispatch.id
+      ? await prisma.patient.findUnique({ where: { dispatchId: dispatch.id } })
+      : null;
+    const vitalSigns = await prisma.vitalSign.findMany({
+      where: { dispatchId: dispatch.id },
+      orderBy: { timestamp: 'asc' },
+    });
+    const medicalRecord = await prisma.medicalRecord.findUnique({
+      where: { dispatchId: dispatch.id },
+    });
+    const alerts = await prisma.alert.findMany({
+      where: { dispatchId: dispatch.id },
+    });
+    const recommendedHospital = dispatch.recommendedHospitalId
+      ? await prisma.hospital.findUnique({ where: { id: dispatch.recommendedHospitalId } })
+      : null;
+    const actualHospital = dispatch.actualHospitalId
+      ? await prisma.hospital.findUnique({ where: { id: dispatch.actualHospitalId } })
+      : null;
+    const suppliesUsed = await prisma.dispatchSupplyUsage.findMany({
+      where: { dispatchId: dispatch.id },
+    });
+
+    const enrichedDispatch = {
+      ...dispatch,
+      call: call
+        ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+        : null,
+      vehicle,
+      dispatcher,
+      patient,
+      vitalSigns,
+      medicalRecord,
+      alerts: alerts.map((a) => ({ ...a, recipients: [] })),
+      recommendedHospital: recommendedHospital
+        ? { ...recommendedHospital, specialties: JSON.parse(recommendedHospital.specialties || '[]') }
+        : null,
+      actualHospital: actualHospital
+        ? { ...actualHospital, specialties: JSON.parse(actualHospital.specialties || '[]') }
+        : null,
+      suppliesUsed: await Promise.all(
+        suppliesUsed.map(async (su) => {
+          const supply = su.supplyId
+            ? await prisma.medicalSupply.findUnique({ where: { id: su.supplyId } })
+            : null;
+          return { ...su, supply };
+        })
+      ),
+    };
+
     res.status(200).json({
       status: 'success',
-      data: { dispatch },
+      data: { dispatch: enrichedDispatch },
     });
   }
 );

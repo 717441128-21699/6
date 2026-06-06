@@ -4,7 +4,7 @@ import prisma from '../config/prisma';
 import { AppError } from '../middleware/errorHandler';
 import { calculateDistance } from '../utils/emergency';
 import { wsService } from '../services/websocket';
-import { UserRole, EmergencyLevel } from '@prisma/client';
+import { UserRole, EmergencyLevel } from '../utils/enums';
 
 export interface HospitalRecommendation {
   id: string;
@@ -72,30 +72,41 @@ export const recommendHospital = asyncHandler(
 
     const dispatch = await prisma.dispatch.findUnique({
       where: { id: dispatchId },
-      include: { call: true, patient: true },
     });
 
     if (!dispatch) {
       return next(new AppError('派单不存在', 404));
     }
 
+    const call = dispatch.callId
+      ? await prisma.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+      : null;
+    const patient = dispatch.id
+      ? await prisma.patient.findUnique({ where: { dispatchId: dispatch.id } })
+      : null;
+
     const targetLat = latitude
       ? parseFloat(latitude as string)
-      : dispatch.call.locationLatitude;
+      : call?.locationLatitude ?? 0;
     const targetLon = longitude
       ? parseFloat(longitude as string)
-      : dispatch.call.locationLongitude;
+      : call?.locationLongitude ?? 0;
 
     const hospitals = await prisma.hospital.findMany({
       where: { hasER: true },
-      include: {
-        departments: { where: { available: true } },
-        staff: {
-          where: { role: UserRole.DOCTOR, isActive: true },
-          select: { id: true, fullName: true, department: true },
-        },
-      },
     });
+
+    const departments = await prisma.hospitalDepartment.findMany({
+      where: { available: true },
+    });
+
+    const hospitalDepartmentsMap = new Map<string, typeof departments>();
+    for (const dept of departments) {
+      if (!hospitalDepartmentsMap.has(dept.hospitalId)) {
+        hospitalDepartmentsMap.set(dept.hospitalId, []);
+      }
+      hospitalDepartmentsMap.get(dept.hospitalId)!.push(dept);
+    }
 
     const currentHour = new Date().getHours();
     const trafficFactor = getTrafficFactor(currentHour);
@@ -111,11 +122,14 @@ export const recommendHospital = asyncHandler(
         hospital.longitude
       );
 
+      const hospitalSpecialties = JSON.parse(hospital.specialties || '[]');
+      const callSymptoms = call ? JSON.parse(call.symptoms || '[]') : [];
+
       const estimatedTravelMinutes = (distance / avgSpeedKmh) * 60 * trafficFactor;
       const hasRequired = matchSpecialties(
-        hospital.specialties,
-        dispatch.call.symptoms,
-        dispatch.call.chiefComplaint
+        hospitalSpecialties,
+        callSymptoms,
+        call?.chiefComplaint || ''
       );
 
       let score = 0;
@@ -139,6 +153,8 @@ export const recommendHospital = asyncHandler(
         if (estimatedTravelMinutes < 15) score += 20;
       }
 
+      const hospitalDepts = hospitalDepartmentsMap.get(hospital.id) || [];
+
       recommendations.push({
         id: hospital.id,
         name: hospital.name,
@@ -151,8 +167,8 @@ export const recommendHospital = asyncHandler(
         hasRequiredSpecialty: hasRequired,
         trafficFactor,
         score,
-        specialties: hospital.specialties,
-        departments: hospital.departments.map((d) => ({
+        specialties: hospitalSpecialties,
+        departments: hospitalDepts.map((d) => ({
           id: d.id,
           name: d.name,
           available: d.available,
@@ -194,26 +210,36 @@ export const confirmHospital = asyncHandler(
 
     const dispatch = await prisma.dispatch.findUnique({
       where: { id: dispatchId },
-      include: { call: true, patient: true, vitalSigns: true },
     });
 
     if (!dispatch) {
       return next(new AppError('派单不存在', 404));
     }
 
+    const call = dispatch.callId
+      ? await prisma.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+      : null;
+    const patient = dispatch.id
+      ? await prisma.patient.findUnique({ where: { dispatchId: dispatch.id } })
+      : null;
+    const vitalSigns = await prisma.vitalSign.findMany({
+      where: { dispatchId: dispatch.id },
+    });
+
     const hospital = await prisma.hospital.findUnique({
       where: { id: hospitalId },
-      include: {
-        departments: true,
-        staff: {
-          where: { role: UserRole.DOCTOR, isActive: true },
-        },
-      },
     });
 
     if (!hospital) {
       return next(new AppError('医院不存在', 404));
     }
+
+    const hospitalDepartments = await prisma.hospitalDepartment.findMany({
+      where: { hospitalId },
+    });
+    const hospitalDoctors = await prisma.user.findMany({
+      where: { hospitalId, role: { in: [UserRole.DOCTOR, UserRole.HOSPITAL_STAFF] }, isActive: true },
+    });
 
     const updatedDispatch = await prisma.dispatch.update({
       where: { id: dispatchId },
@@ -221,19 +247,31 @@ export const confirmHospital = asyncHandler(
         recommendedHospitalId: hospitalId,
         actualHospitalId: hospitalId,
       },
-      include: {
-        call: true,
-        patient: true,
-        actualHospital: true,
-        recommendedHospital: true,
-      },
     });
 
+    const actualHospital = {
+      ...hospital,
+      specialties: JSON.parse(hospital.specialties || '[]'),
+      departments: hospitalDepartments,
+      staff: hospitalDoctors,
+    };
+    const recommendedHospital = actualHospital;
+
+    const enrichedDispatch = {
+      ...updatedDispatch,
+      call: call
+        ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+        : null,
+      patient,
+      actualHospital,
+      recommendedHospital,
+    };
+
     const patientInfo = {
-      dispatch: updatedDispatch,
-      patient: dispatch.patient,
-      call: dispatch.call,
-      vitalSigns: dispatch.vitalSigns,
+      dispatch: enrichedDispatch,
+      patient,
+      call,
+      vitalSigns,
       eta: new Date(Date.now() + 15 * 60 * 1000),
     };
 
@@ -243,12 +281,12 @@ export const confirmHospital = asyncHandler(
       {
         type: 'PATIENT_INCOMING',
         title: `患者即将送达通知`,
-        content: `${dispatch.call.emergencyLevel}级患者即将送达${hospital.name}`,
+        content: `${call?.emergencyLevel || ''}级患者即将送达${hospital.name}`,
         patientInfo,
       }
     );
 
-    hospital.staff.forEach((doctor) => {
+    hospitalDoctors.forEach((doctor) => {
       wsService.emitToUser(doctor.id, 'notification:created', {
         type: 'PATIENT_INCOMING',
         patientInfo,
@@ -256,14 +294,14 @@ export const confirmHospital = asyncHandler(
     });
 
     wsService.broadcastDispatchUpdate(dispatchId, {
-      dispatch: updatedDispatch,
+      dispatch: enrichedDispatch,
       event: 'hospital_confirmed',
-      hospital,
+      hospital: actualHospital,
     });
 
     res.status(200).json({
       status: 'success',
-      data: { dispatch: updatedDispatch },
+      data: { dispatch: enrichedDispatch },
     });
   }
 );
@@ -321,13 +359,27 @@ export const listHospitals = asyncHandler(
 
     const hospitals = await prisma.hospital.findMany({
       where,
-      include: { departments: true },
       orderBy: { name: 'asc' },
     });
 
+    const allDepartments = await prisma.hospitalDepartment.findMany();
+    const deptMap = new Map<string, typeof allDepartments>();
+    for (const dept of allDepartments) {
+      if (!deptMap.has(dept.hospitalId)) {
+        deptMap.set(dept.hospitalId, []);
+      }
+      deptMap.get(dept.hospitalId)!.push(dept);
+    }
+
     res.status(200).json({
       status: 'success',
-      data: { hospitals },
+      data: {
+        hospitals: hospitals.map((h) => ({
+          ...h,
+          specialties: JSON.parse(h.specialties || '[]'),
+          departments: deptMap.get(h.id) || [],
+        })),
+      },
     });
   }
 );
@@ -338,26 +390,35 @@ export const getHospital = asyncHandler(
 
     const hospital = await prisma.hospital.findUnique({
       where: { id },
-      include: {
-        departments: true,
-        staff: {
-          select: {
-            id: true,
-            fullName: true,
-            department: true,
-            role: true,
-          },
-        },
-      },
     });
 
     if (!hospital) {
       return next(new AppError('医院不存在', 404));
     }
 
+    const departments = await prisma.hospitalDepartment.findMany({
+      where: { hospitalId: id },
+    });
+    const staff = await prisma.user.findMany({
+      where: { hospitalId: id },
+      select: {
+        id: true,
+        fullName: true,
+        department: true,
+        role: true,
+      },
+    });
+
     res.status(200).json({
       status: 'success',
-      data: { hospital },
+      data: {
+        hospital: {
+          ...hospital,
+          specialties: JSON.parse(hospital.specialties || '[]'),
+          departments,
+          staff,
+        },
+      },
     });
   }
 );

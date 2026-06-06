@@ -1,6 +1,6 @@
 import { Server as HTTPServer } from 'http';
 import { Server, Socket } from 'socket.io';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../utils/enums';
 import jwt from 'jsonwebtoken';
 
 interface JwtPayload {

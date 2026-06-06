@@ -1,4 +1,4 @@
-import { PrismaClient, UserRole, VehicleStatus } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
@@ -16,7 +16,7 @@ async function main() {
       username: 'admin',
       passwordHash: hashedPassword,
       fullName: '系统管理员',
-      role: UserRole.ADMIN,
+      role: 'ADMIN',
       phone: '13800138000',
       email: 'admin@emergency.com',
     },
@@ -29,7 +29,7 @@ async function main() {
       username: 'dispatcher',
       passwordHash: hashedPassword,
       fullName: '张调度',
-      role: UserRole.DISPATCHER,
+      role: 'DISPATCHER',
       phone: '13800138001',
       email: 'dispatcher@emergency.com',
     },
@@ -42,7 +42,7 @@ async function main() {
       username: 'paramedic1',
       passwordHash: hashedPassword,
       fullName: '李急救',
-      role: UserRole.PARAMEDIC,
+      role: 'PARAMEDIC',
       phone: '13800138002',
       email: 'paramedic1@emergency.com',
     },
@@ -55,7 +55,7 @@ async function main() {
       username: 'paramedic2',
       passwordHash: hashedPassword,
       fullName: '王医生',
-      role: UserRole.PARAMEDIC,
+      role: 'PARAMEDIC',
       phone: '13800138003',
       email: 'paramedic2@emergency.com',
     },
@@ -68,7 +68,7 @@ async function main() {
       username: 'doctor1',
       passwordHash: hashedPassword,
       fullName: '赵主任',
-      role: UserRole.DOCTOR,
+      role: 'DOCTOR',
       phone: '13800138004',
       email: 'doctor1@hospital.com',
       department: '急诊科',
@@ -82,7 +82,7 @@ async function main() {
       username: 'hospstaff',
       passwordHash: hashedPassword,
       fullName: '孙护士',
-      role: UserRole.HOSPITAL_STAFF,
+      role: 'HOSPITAL_STAFF',
       phone: '13800138005',
       email: 'staff@hospital.com',
       department: '急诊科',
@@ -148,7 +148,7 @@ async function main() {
     create: {
       plateNumber: '京A12001',
       vehicleType: '监护型救护车',
-      status: VehicleStatus.AVAILABLE,
+      status: 'AVAILABLE',
       stationId: station1.id,
       currentTeamId: team1.id,
       currentLatitude: station1.latitude,
@@ -163,7 +163,7 @@ async function main() {
     create: {
       plateNumber: '京A12002',
       vehicleType: '抢救型救护车',
-      status: VehicleStatus.AVAILABLE,
+      status: 'AVAILABLE',
       stationId: station1.id,
       currentTeamId: team2.id,
       currentLatitude: station1.latitude,
@@ -178,7 +178,7 @@ async function main() {
     create: {
       plateNumber: '京B12001',
       vehicleType: '监护型救护车',
-      status: VehicleStatus.AVAILABLE,
+      status: 'AVAILABLE',
       stationId: station2.id,
       currentLatitude: station2.latitude,
       currentLongitude: station2.longitude,
@@ -202,7 +202,7 @@ async function main() {
       erBedsOccupied: 12,
       erDoctorsOnDuty: 5,
       erLoadLevel: 0.4,
-      specialties: ['cardiology', 'neurology', 'emergency', 'trauma', 'surgery'],
+      specialties: JSON.stringify(['cardiology', 'neurology', 'emergency', 'trauma', 'surgery']),
     },
   });
 
@@ -221,7 +221,7 @@ async function main() {
       erBedsOccupied: 18,
       erDoctorsOnDuty: 4,
       erLoadLevel: 0.72,
-      specialties: ['cardiology', 'emergency', 'pediatrics', 'respiration'],
+      specialties: JSON.stringify(['cardiology', 'emergency', 'pediatrics', 'respiration']),
     },
   });
 
@@ -240,26 +240,29 @@ async function main() {
       erBedsOccupied: 8,
       erDoctorsOnDuty: 6,
       erLoadLevel: 0.4,
-      specialties: ['cardiology', 'neurology'],
+      specialties: JSON.stringify(['cardiology', 'neurology']),
     },
   });
 
   await prisma.user.update({ where: { id: doctor1.id }, data: { hospitalId: hospital1.id } });
   await prisma.user.update({ where: { id: hospitalStaff.id }, data: { hospitalId: hospital1.id } });
 
-  await prisma.hospitalDepartment.createMany({
-    data: [
-      { hospitalId: hospital1.id, name: '急诊科', contactPhone: '010-88888001', available: true },
-      { hospitalId: hospital1.id, name: '心内科', contactPhone: '010-88888002', available: true },
-      { hospitalId: hospital1.id, name: '神经内科', contactPhone: '010-88888003', available: true },
-      { hospitalId: hospital1.id, name: '创伤外科', contactPhone: '010-88888004', available: true },
-      { hospitalId: hospital2.id, name: '急诊科', contactPhone: '010-66666001', available: true },
-      { hospitalId: hospital2.id, name: '儿科急诊', contactPhone: '010-66666002', available: true },
-      { hospitalId: hospital3.id, name: '急诊介入中心', contactPhone: '010-55555001', available: true },
-      { hospitalId: hospital3.id, name: '脑卒中中心', contactPhone: '010-55555002', available: true },
-    ],
-    skipDuplicates: true,
-  });
+  const depts = [
+    { hospitalId: hospital1.id, name: '急诊科', contactPhone: '010-88888001', available: true },
+    { hospitalId: hospital1.id, name: '心内科', contactPhone: '010-88888002', available: true },
+    { hospitalId: hospital1.id, name: '神经内科', contactPhone: '010-88888003', available: true },
+    { hospitalId: hospital1.id, name: '创伤外科', contactPhone: '010-88888004', available: true },
+    { hospitalId: hospital2.id, name: '急诊科', contactPhone: '010-66666001', available: true },
+    { hospitalId: hospital2.id, name: '儿科急诊', contactPhone: '010-66666002', available: true },
+    { hospitalId: hospital3.id, name: '急诊介入中心', contactPhone: '010-55555001', available: true },
+    { hospitalId: hospital3.id, name: '脑卒中中心', contactPhone: '010-55555002', available: true },
+  ];
+  for (const d of depts) {
+    const existing = await prisma.hospitalDepartment.findFirst({
+      where: { hospitalId: d.hospitalId, name: d.name },
+    });
+    if (!existing) await prisma.hospitalDepartment.create({ data: d as any });
+  }
 
   console.log('6/7: 创建医疗物资...');
   const supplies = [
@@ -330,7 +333,7 @@ async function main() {
 ║    • 急救站: 2个                                       ║
 ║    • 急救小组: 2个                                     ║
 ║    • 救护车: 3辆                                       ║
-║    • 医院: 3家（含14个科室）                           ║
+║    • 医院: 3家（含8个科室）                            ║
 ║    • 医疗物资: 13种                                    ║
 ║    • 车辆物资库存: 39条                                ║
 ║                                                       ║

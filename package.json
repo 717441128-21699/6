@@ -11,6 +11,7 @@
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:seed": "ts-node prisma/seed.ts",
     "test:e2e": "ts-node tests/e2e-flow.test.ts",
+    "test:quick": "ts-node --transpile-only tests/quick-e2e.ts",
     "test:ws": "ts-node tests/websocket-listener.ts"
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-import { EmergencyLevel } from '@prisma/client';
+import { EmergencyLevel } from './enums';
 
 export interface VitalSignRanges {
   heartRate: { min: number; max: number };

@@ -4,7 +4,7 @@ import prisma from '../config/prisma';
 import { AppError } from '../middleware/errorHandler';
 import { generateSupplyRequestNumber } from '../utils/emergency';
 import { wsService } from '../services/websocket';
-import { SupplyRequestStatus, UserRole } from '@prisma/client';
+import { SupplyRequestStatus, UserRole } from '../utils/enums';
 
 export const recordSupplyUsage = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
@@ -17,12 +17,15 @@ export const recordSupplyUsage = asyncHandler(
 
     const dispatch = await prisma.dispatch.findUnique({
       where: { id: dispatchId },
-      include: { vehicle: true },
     });
 
     if (!dispatch) {
       return next(new AppError('派单不存在', 404));
     }
+
+    const vehicle = dispatch.vehicleId
+      ? await prisma.vehicle.findUnique({ where: { id: dispatch.vehicleId } })
+      : null;
 
     if (!supplies && fuelUsed === undefined) {
       return next(new AppError('请提供消耗物资或油料数据', 400));
@@ -57,6 +60,8 @@ export const recordSupplyUsage = asyncHandler(
             );
           }
 
+          const supply = await tx.medicalSupply.findUnique({ where: { id: supplyId } });
+
           const record = await tx.dispatchSupplyUsage.create({
             data: {
               dispatchId,
@@ -64,7 +69,6 @@ export const recordSupplyUsage = asyncHandler(
               quantityUsed,
               notes,
             },
-            include: { supply: true },
           });
 
           await tx.vehicleSupply.update({
@@ -79,16 +83,16 @@ export const recordSupplyUsage = asyncHandler(
             },
           });
 
-          usageRecords.push(record);
+          usageRecords.push({ ...record, supply });
         }
       }
 
-      if (fuelUsed !== undefined && fuelUsed > 0) {
+      if (fuelUsed !== undefined && fuelUsed > 0 && vehicle) {
         await tx.vehicle.update({
           where: { id: dispatch.vehicleId },
           data: {
             fuelLevel: {
-              decrement: Math.min(fuelUsed, dispatch.vehicle.fuelLevel),
+              decrement: Math.min(fuelUsed, vehicle.fuelLevel),
             },
           },
         });
@@ -96,11 +100,17 @@ export const recordSupplyUsage = asyncHandler(
 
       const vehicleSupplies = await tx.vehicleSupply.findMany({
         where: { vehicleId: dispatch.vehicleId },
-        include: { supply: true },
       });
 
-      const lowStockItems = vehicleSupplies.filter(
-        (vs) => vs.quantity < vs.supply.safetyStock
+      const suppliesWithDetails = await Promise.all(
+        vehicleSupplies.map(async (vs) => {
+          const supply = await tx.medicalSupply.findUnique({ where: { id: vs.supplyId } });
+          return { ...vs, supply };
+        })
+      );
+
+      const lowStockItems = suppliesWithDetails.filter(
+        (vs) => vs.quantity < (vs.supply?.safetyStock ?? 0)
       );
 
       return { usageRecords, lowStockItems };
@@ -113,7 +123,7 @@ export const recordSupplyUsage = asyncHandler(
         {
           type: 'LOW_SUPPLY_STOCK',
           title: '物资库存预警',
-          content: `车辆 ${dispatch.vehicle.plateNumber} 有${result.lowStockItems.length}种物资低于安全线`,
+          content: `车辆 ${vehicle?.plateNumber || ''} 有${result.lowStockItems.length}种物资低于安全线`,
           lowStockItems: result.lowStockItems,
           vehicleId: dispatch.vehicleId,
         }
@@ -137,23 +147,30 @@ export const checkVehicleStock = asyncHandler(
 
     const vehicle = await prisma.vehicle.findUnique({
       where: { id: vehicleId },
-      include: {
-        station: { select: { name: true } },
-      },
     });
 
     if (!vehicle) {
       return next(new AppError('车辆不存在', 404));
     }
 
-    const supplies = await prisma.vehicleSupply.findMany({
+    const station = vehicle.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: vehicle.stationId }, select: { name: true } })
+      : null;
+
+    const vehicleSupplies = await prisma.vehicleSupply.findMany({
       where: { vehicleId },
-      include: { supply: true },
       orderBy: { updatedAt: 'desc' },
     });
 
+    const supplies = await Promise.all(
+      vehicleSupplies.map(async (vs) => {
+        const supply = await prisma.medicalSupply.findUnique({ where: { id: vs.supplyId } });
+        return { ...vs, supply };
+      })
+    );
+
     const lowStockItems = supplies.filter(
-      (vs) => vs.quantity < vs.supply.safetyStock
+      (vs) => vs.quantity < (vs.supply?.safetyStock ?? 0)
     );
 
     res.status(200).json({
@@ -163,7 +180,7 @@ export const checkVehicleStock = asyncHandler(
           id: vehicle.id,
           plateNumber: vehicle.plateNumber,
           fuelLevel: vehicle.fuelLevel,
-          station: vehicle.station,
+          station,
         },
         supplies,
         lowStockItems,
@@ -206,16 +223,17 @@ export const createSupplyRequest = asyncHandler(
       });
 
       const requestItems = await Promise.all(
-        items.map((item: any) =>
-          tx.supplyRequestItem.create({
+        items.map(async (item: any) => {
+          const requestItem = await tx.supplyRequestItem.create({
             data: {
               requestId: request.id,
               supplyId: item.supplyId,
               requestedQuantity: item.requestedQuantity,
             },
-            include: { supply: true },
-          })
-        )
+          });
+          const supply = await tx.medicalSupply.findUnique({ where: { id: item.supplyId } });
+          return { ...requestItem, supply };
+        })
       );
 
       return { ...request, items: requestItems };
@@ -253,11 +271,17 @@ export const autoGenerateSupplyRequest = asyncHandler(
 
     const vehicleSupplies = await prisma.vehicleSupply.findMany({
       where: { vehicleId },
-      include: { supply: true },
     });
 
-    const lowStockItems = vehicleSupplies.filter(
-      (vs) => vs.quantity < vs.supply.safetyStock
+    const suppliesWithDetails = await Promise.all(
+      vehicleSupplies.map(async (vs) => {
+        const supply = await prisma.medicalSupply.findUnique({ where: { id: vs.supplyId } });
+        return { ...vs, supply };
+      })
+    );
+
+    const lowStockItems = suppliesWithDetails.filter(
+      (vs) => vs.quantity < (vs.supply?.safetyStock ?? 0)
     );
 
     if (lowStockItems.length === 0 && vehicle.fuelLevel >= 30) {
@@ -271,8 +295,8 @@ export const autoGenerateSupplyRequest = asyncHandler(
     const items = lowStockItems.map((vs) => ({
       supplyId: vs.supplyId,
       requestedQuantity: Math.max(
-        vs.supply.defaultQuantityPerVehicle,
-        vs.supply.safetyStock * 2 - vs.quantity
+        vs.supply?.defaultQuantityPerVehicle ?? 0,
+        (vs.supply?.safetyStock ?? 0) * 2 - vs.quantity
       ),
     }));
 
@@ -284,7 +308,7 @@ export const autoGenerateSupplyRequest = asyncHandler(
           requestedById: 'system',
           status: SupplyRequestStatus.PENDING,
           priority: lowStockItems.some(
-            (vs) => vs.quantity < vs.supply.safetyStock * 0.3
+            (vs) => vs.quantity < (vs.supply?.safetyStock ?? 0) * 0.3
           )
             ? 'URGENT'
             : 'NORMAL',
@@ -304,10 +328,17 @@ export const autoGenerateSupplyRequest = asyncHandler(
         });
       }
 
-      return tx.supplyRequest.findUnique({
-        where: { id: request.id },
-        include: { items: { include: { supply: true } }, vehicle: true },
+      const requestItems = await tx.supplyRequestItem.findMany({
+        where: { requestId: request.id },
       });
+      const itemsWithSupply = await Promise.all(
+        requestItems.map(async (ri) => {
+          const supply = await tx.medicalSupply.findUnique({ where: { id: ri.supplyId } });
+          return { ...ri, supply };
+        })
+      );
+
+      return { ...request, items: itemsWithSupply, vehicle };
     });
 
     wsService.emitToRoles(
@@ -340,18 +371,41 @@ export const listSupplyRequests = asyncHandler(
 
     const requests = await prisma.supplyRequest.findMany({
       where,
-      include: {
-        vehicle: true,
-        requestedBy: { select: { id: true, fullName: true } },
-        items: { include: { supply: true } },
-      },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
 
+    const enrichedRequests = await Promise.all(
+      requests.map(async (r) => {
+        const vehicle = r.vehicleId
+          ? await prisma.vehicle.findUnique({ where: { id: r.vehicleId } })
+          : null;
+        const requestedBy = r.requestedById && r.requestedById !== 'system'
+          ? await prisma.user.findUnique({ where: { id: r.requestedById }, select: { id: true, fullName: true } })
+          : null;
+        const items = await prisma.supplyRequestItem.findMany({
+          where: { requestId: r.id },
+        });
+        const itemsWithSupply = await Promise.all(
+          items.map(async (i) => {
+            const supply = i.supplyId
+              ? await prisma.medicalSupply.findUnique({ where: { id: i.supplyId } })
+              : null;
+            return { ...i, supply };
+          })
+        );
+        return {
+          ...r,
+          vehicle,
+          requestedBy,
+          items: itemsWithSupply,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { requests },
+      data: { requests: enrichedRequests },
     });
   }
 );
@@ -367,12 +421,15 @@ export const updateSupplyRequestStatus = asyncHandler(
 
     const request = await prisma.supplyRequest.findUnique({
       where: { id },
-      include: { items: true },
     });
 
     if (!request) {
       return next(new AppError('申请不存在', 404));
     }
+
+    const requestItems = await prisma.supplyRequestItem.findMany({
+      where: { requestId: id },
+    });
 
     const now = new Date();
     const updateData: any = { status };
@@ -393,10 +450,6 @@ export const updateSupplyRequestStatus = asyncHandler(
       const updated = await tx.supplyRequest.update({
         where: { id },
         data: updateData,
-        include: {
-          items: { include: { supply: true } },
-          vehicle: true,
-        },
       });
 
       if (status === SupplyRequestStatus.FULFILLED && items) {
@@ -430,7 +483,26 @@ export const updateSupplyRequestStatus = asyncHandler(
         }
       }
 
-      return updated;
+      const vehicle = updated.vehicleId
+        ? await tx.vehicle.findUnique({ where: { id: updated.vehicleId } })
+        : null;
+      const dbItems = await tx.supplyRequestItem.findMany({
+        where: { requestId: updated.id },
+      });
+      const itemsWithSupply = await Promise.all(
+        dbItems.map(async (i) => {
+          const supply = i.supplyId
+            ? await tx.medicalSupply.findUnique({ where: { id: i.supplyId } })
+            : null;
+          return { ...i, supply };
+        })
+      );
+
+      return {
+        ...updated,
+        vehicle,
+        items: itemsWithSupply,
+      };
     });
 
     wsService.emitToRoles(

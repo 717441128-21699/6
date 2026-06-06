@@ -11,7 +11,7 @@ import {
   AlertSeverity,
   AlertStatus,
   UserRole,
-} from '@prisma/client';
+} from '../utils/enums';
 
 export const uploadVitalSigns = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
@@ -30,21 +30,23 @@ export const uploadVitalSigns = asyncHandler(
 
     const dispatch = await prisma.dispatch.findUnique({
       where: { id: dispatchId },
-      include: {
-        call: true,
-        actualHospital: {
-          include: {
-            staff: {
-              where: { role: UserRole.DOCTOR, isActive: true },
-            },
-          },
-        },
-      },
     });
 
     if (!dispatch) {
       return next(new AppError('派单不存在', 404));
     }
+
+    const call = dispatch.callId
+      ? await prisma.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+      : null;
+    const actualHospital = dispatch.actualHospitalId
+      ? await prisma.hospital.findUnique({ where: { id: dispatch.actualHospitalId } })
+      : null;
+    const hospitalDoctors = dispatch.actualHospitalId
+      ? await prisma.user.findMany({
+          where: { hospitalId: dispatch.actualHospitalId, role: UserRole.DOCTOR, isActive: true },
+        })
+      : [];
 
     const checkResult = checkVitalSignAbnormal({
       heartRate,
@@ -81,7 +83,7 @@ export const uploadVitalSigns = asyncHandler(
     if (checkResult.isAbnormal) {
       const diagnosisSuggestion = generateDiagnosisSuggestion(
         checkResult.abnormalities,
-        dispatch.call.chiefComplaint
+        call?.chiefComplaint || ''
       );
 
       const alert = await prisma.$transaction(async (tx) => {
@@ -100,13 +102,27 @@ export const uploadVitalSigns = asyncHandler(
             message: `生命体征异常：${checkResult.abnormalities.join('；')}`,
             diagnosisSuggestion,
           },
-          include: {
-            vitalSign: true,
-            dispatch: {
-              include: { call: true, patient: true, vehicle: true },
-            },
-          },
         });
+
+        const patient = dispatch.id
+          ? await tx.patient.findUnique({ where: { dispatchId: dispatch.id } })
+          : null;
+        const vehicle = dispatch.vehicleId
+          ? await tx.vehicle.findUnique({ where: { id: dispatch.vehicleId } })
+          : null;
+
+        const enrichedAlert = {
+          ...newAlert,
+          vitalSign,
+          dispatch: {
+            ...dispatch,
+            call: call
+              ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+              : null,
+            patient,
+            vehicle,
+          },
+        };
 
         const recipients: { alertId: string; userId: string }[] = [];
 
@@ -131,13 +147,11 @@ export const uploadVitalSigns = asyncHandler(
           }
         });
 
-        if (dispatch.actualHospital?.staff) {
-          dispatch.actualHospital.staff.forEach((doc) => {
-            if (!recipients.some((r) => r.userId === doc.id)) {
-              recipients.push({ alertId: newAlert.id, userId: doc.id });
-            }
-          });
-        }
+        hospitalDoctors.forEach((doc) => {
+          if (!recipients.some((r) => r.userId === doc.id)) {
+            recipients.push({ alertId: newAlert.id, userId: doc.id });
+          }
+        });
 
         if (recipients.length > 0) {
           await tx.alertRecipient.createMany({
@@ -145,12 +159,12 @@ export const uploadVitalSigns = asyncHandler(
           });
         }
 
-        return newAlert;
+        return enrichedAlert;
       });
 
       wsService.broadcastAlert(alert);
 
-      alert.dispatch?.assignedTeamId &&
+      dispatch.assignedTeamId &&
         (async () => {
           const teamMembers = await prisma.user.findMany({
             where: { teamId: dispatch.assignedTeamId },
@@ -197,36 +211,73 @@ export const listAlerts = asyncHandler(
     if (status) where.status = status;
     if (severity) where.severity = severity;
     if (dispatchId) where.dispatchId = dispatchId as string;
+
+    let alertIds: string[] | null = null;
     if (userId) {
-      where.recipients = {
-        some: { userId: userId as string },
-      };
+      const recipients = await prisma.alertRecipient.findMany({
+        where: { userId: userId as string },
+        select: { alertId: true },
+      });
+      alertIds = recipients.map((r) => r.alertId);
+      where.id = { in: alertIds };
     }
 
     const alerts = await prisma.alert.findMany({
       where,
-      include: {
-        dispatch: {
-          include: {
-            call: true,
-            patient: true,
-            vehicle: true,
-          },
-        },
-        vitalSign: true,
-        recipients: {
-          include: {
-            user: { select: { id: true, fullName: true } },
-          },
-        },
-      },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
 
+    const enrichedAlerts = await Promise.all(
+      alerts.map(async (a) => {
+        const dispatch = a.dispatchId
+          ? await prisma.dispatch.findUnique({ where: { id: a.dispatchId } })
+          : null;
+        const call = dispatch?.callId
+          ? await prisma.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+          : null;
+        const patient = dispatch?.id
+          ? await prisma.patient.findUnique({ where: { dispatchId: dispatch.id } })
+          : null;
+        const vehicle = dispatch?.vehicleId
+          ? await prisma.vehicle.findUnique({ where: { id: dispatch.vehicleId } })
+          : null;
+        const vitalSign = a.vitalSignId
+          ? await prisma.vitalSign.findUnique({ where: { id: a.vitalSignId } })
+          : null;
+        const recipients = await prisma.alertRecipient.findMany({
+          where: { alertId: a.id },
+        });
+        const recipientsWithUser = await Promise.all(
+          recipients.map(async (r) => {
+            const user = await prisma.user.findUnique({
+              where: { id: r.userId },
+              select: { id: true, fullName: true },
+            });
+            return { ...r, user };
+          })
+        );
+        return {
+          ...a,
+          dispatch: dispatch
+            ? {
+                ...dispatch,
+                call: call
+                  ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+                  : null,
+                patient,
+                vehicle,
+              }
+            : null,
+          vitalSign,
+          recipients: recipientsWithUser,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { alerts },
+      data: { alerts: enrichedAlerts },
     });
   }
 );
@@ -254,10 +305,6 @@ export const acknowledgeAlert = asyncHandler(
           status: AlertStatus.ACKNOWLEDGED,
           acknowledgedAt: new Date(),
         },
-        include: {
-          dispatch: { include: { call: true } },
-          vitalSign: true,
-        },
       });
 
       await tx.alertRecipient.updateMany({
@@ -265,7 +312,28 @@ export const acknowledgeAlert = asyncHandler(
         data: { readAt: new Date() },
       });
 
-      return updated;
+      const dispatch = updated.dispatchId
+        ? await tx.dispatch.findUnique({ where: { id: updated.dispatchId } })
+        : null;
+      const call = dispatch?.callId
+        ? await tx.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+        : null;
+      const vitalSign = updated.vitalSignId
+        ? await tx.vitalSign.findUnique({ where: { id: updated.vitalSignId } })
+        : null;
+
+      return {
+        ...updated,
+        dispatch: dispatch
+          ? {
+              ...dispatch,
+              call: call
+                ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+                : null,
+            }
+          : null,
+        vitalSign,
+      };
     });
 
     wsService.emitToRoles(
@@ -293,17 +361,36 @@ export const resolveAlert = asyncHandler(
       return next(new AppError('预警不存在', 404));
     }
 
-    const updatedAlert = await prisma.alert.update({
+    const updated = await prisma.alert.update({
       where: { id },
       data: {
         status: AlertStatus.RESOLVED,
         resolvedAt: new Date(),
       },
-      include: {
-        dispatch: { include: { call: true } },
-        vitalSign: true,
-      },
     });
+
+    const dispatch = updated.dispatchId
+      ? await prisma.dispatch.findUnique({ where: { id: updated.dispatchId } })
+      : null;
+    const call = dispatch?.callId
+      ? await prisma.emergencyCall.findUnique({ where: { id: dispatch.callId } })
+      : null;
+    const vitalSign = updated.vitalSignId
+      ? await prisma.vitalSign.findUnique({ where: { id: updated.vitalSignId } })
+      : null;
+
+    const updatedAlert = {
+      ...updated,
+      dispatch: dispatch
+        ? {
+            ...dispatch,
+            call: call
+              ? { ...call, symptoms: JSON.parse(call.symptoms || '[]') }
+              : null,
+          }
+        : null,
+      vitalSign,
+    };
 
     wsService.emitToRoles(
       [UserRole.DISPATCHER, UserRole.PARAMEDIC, UserRole.DOCTOR],

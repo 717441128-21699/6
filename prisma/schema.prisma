@@ -6,89 +6,25 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
-enum UserRole {
-  ADMIN
-  DISPATCHER
-  PARAMEDIC
-  DOCTOR
-  HOSPITAL_STAFF
-}
-
-enum VehicleStatus {
-  AVAILABLE
-  ON_CALL
-  ON_ROUTE
-  AT_SCENE
-  TRANSPORTING
-  AT_HOSPITAL
-  RETURNING
-  MAINTENANCE
-  OUT_OF_SERVICE
-}
-
-enum EmergencyLevel {
-  CRITICAL
-  SEVERE
-  MODERATE
-  MINOR
-}
-
-enum DispatchStatus {
-  PENDING
-  ASSIGNED
-  ACCEPTED
-  EN_ROUTE_TO_SCENE
-  AT_SCENE
-  EN_ROUTE_TO_HOSPITAL
-  AT_HOSPITAL
-  COMPLETED
-  CANCELLED
-}
-
-enum AlertSeverity {
-  CRITICAL
-  WARNING
-  INFO
-}
-
-enum AlertStatus {
-  PENDING
-  ACKNOWLEDGED
-  RESOLVED
-}
-
-enum SupplyRequestStatus {
-  PENDING
-  APPROVED
-  REJECTED
-  FULFILLED
-}
-
 model User {
-  id              String            @id @default(cuid())
-  username        String            @unique
+  id              String   @id @default(cuid())
+  username        String   @unique
   passwordHash    String
   fullName        String
-  role            UserRole
+  role            String
   phone           String?
-  email           String?           @unique
+  email           String?  @unique
   stationId       String?
   teamId          String?
   hospitalId      String?
   department      String?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  isActive        Boolean           @default(true)
-
-  dispatchesAsDispatcher Dispatch[] @relation("DispatcherDispatches")
-  dispatchesAsDoctor     Dispatch[] @relation("DoctorDispatches")
-  alertRecipients        AlertRecipient[]
-  requestedSupplies      SupplyRequest[] @relation("RequestedByUser")
-  approvedSupplies       SupplyRequest[] @relation("ApprovedByUser")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  isActive        Boolean  @default(true)
 }
 
 model EmergencyStation {
@@ -110,15 +46,13 @@ model EmergencyTeam {
   stationId     String
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-
-  dispatches    Dispatch[]
 }
 
 model Vehicle {
   id              String   @id @default(cuid())
   plateNumber     String   @unique
   vehicleType     String
-  status          VehicleStatus @default(AVAILABLE)
+  status          String   @default("AVAILABLE")
   stationId       String
   currentTeamId   String?
   currentLatitude Float?
@@ -128,10 +62,6 @@ model Vehicle {
   fuelLevel       Float    @default(100)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  dispatches      Dispatch[]
-  supplies        VehicleSupply[]
-  supplyRequests  SupplyRequest[]
 }
 
 model Hospital {
@@ -147,13 +77,9 @@ model Hospital {
   erDoctorsOnDuty Int      @default(0)
   erLoadLevel     Float    @default(0)
   lastLoadUpdate  DateTime?
-  specialties     String[]
+  specialties     String
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  departments     HospitalDepartment[]
-  recommendedDispatches Dispatch[] @relation("RecommendedHospital")
-  actualDispatches      Dispatch[] @relation("ActualHospital")
 }
 
 model HospitalDepartment {
@@ -164,8 +90,6 @@ model HospitalDepartment {
   available     Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-
-  hospital      Hospital  @relation(fields: [hospitalId], references: [id])
 }
 
 model EmergencyCall {
@@ -180,22 +104,19 @@ model EmergencyCall {
   locationLatitude Float
   locationLongitude Float
   chiefComplaint  String
-  symptoms        String[]
-  emergencyLevel  EmergencyLevel
+  symptoms        String
+  emergencyLevel  String
   callTime        DateTime
   notes           String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  dispatch        Dispatch?
-  patient         Patient?
 }
 
 model Dispatch {
   id              String   @id @default(cuid())
   callId          String   @unique
-  status          DispatchStatus @default(PENDING)
-  level           EmergencyLevel
+  status          String   @default("PENDING")
+  level           String
   dispatcherId    String
   vehicleId       String
   assignedTeamId  String?
@@ -212,19 +133,6 @@ model Dispatch {
   dispatchNotes   String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  call            EmergencyCall @relation(fields: [callId], references: [id])
-  dispatcher      User         @relation("DispatcherDispatches", fields: [dispatcherId], references: [id])
-  vehicle         Vehicle      @relation(fields: [vehicleId], references: [id])
-  assignedTeam    EmergencyTeam? @relation(fields: [assignedTeamId], references: [id])
-  assignedDoctor  User?        @relation("DoctorDispatches", fields: [assignedDoctorId], references: [id])
-  recommendedHospital Hospital? @relation("RecommendedHospital", fields: [recommendedHospitalId], references: [id])
-  actualHospital      Hospital? @relation("ActualHospital", fields: [actualHospitalId], references: [id])
-  patient         Patient?
-  vitalSigns      VitalSign[]
-  medicalRecord   MedicalRecord?
-  suppliesUsed    DispatchSupplyUsage[]
-  alerts          Alert[]
 }
 
 model Patient {
@@ -241,9 +149,6 @@ model Patient {
   currentMedications String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  call            EmergencyCall @relation(fields: [callId], references: [id])
-  dispatch        Dispatch?     @relation(fields: [dispatchId], references: [id])
 }
 
 model VitalSign {
@@ -261,16 +166,13 @@ model VitalSign {
   isAbnormal      Boolean  @default(false)
   notes           String?
   createdAt       DateTime @default(now())
-
-  dispatch        Dispatch @relation(fields: [dispatchId], references: [id])
-  alerts          Alert[]
 }
 
 model Alert {
   id              String   @id @default(cuid())
   type            String
-  severity        AlertSeverity
-  status          AlertStatus @default(PENDING)
+  severity        String
+  status          String   @default("PENDING")
   dispatchId      String?
   vitalSignId     String?
   message         String
@@ -279,10 +181,6 @@ model Alert {
   resolvedAt      DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  dispatch        Dispatch?   @relation(fields: [dispatchId], references: [id])
-  vitalSign       VitalSign?  @relation(fields: [vitalSignId], references: [id])
-  recipients      AlertRecipient[]
 }
 
 model AlertRecipient {
@@ -291,9 +189,6 @@ model AlertRecipient {
   userId          String
   readAt          DateTime?
   notifiedAt      DateTime @default(now())
-
-  alert           Alert  @relation(fields: [alertId], references: [id])
-  user            User   @relation(fields: [userId], references: [id])
 
   @@unique([alertId, userId])
 }
@@ -317,8 +212,6 @@ model MedicalRecord {
   syncedAt        DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  dispatch        Dispatch @relation(fields: [dispatchId], references: [id])
 }
 
 model MedicalSupply {
@@ -330,10 +223,6 @@ model MedicalSupply {
   defaultQuantityPerVehicle Float
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  vehicleStocks   VehicleSupply[]
-  usageRecords    DispatchSupplyUsage[]
-  supplyRequestItems  SupplyRequestItem[]
 }
 
 model VehicleSupply {
@@ -345,9 +234,6 @@ model VehicleSupply {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  vehicle         Vehicle       @relation(fields: [vehicleId], references: [id])
-  supply          MedicalSupply @relation(fields: [supplyId], references: [id])
-
   @@unique([vehicleId, supplyId])
 }
 
@@ -358,9 +244,6 @@ model DispatchSupplyUsage {
   quantityUsed    Float
   notes           String?
   createdAt       DateTime @default(now())
-
-  dispatch        Dispatch      @relation(fields: [dispatchId], references: [id])
-  supply          MedicalSupply @relation(fields: [supplyId], references: [id])
 }
 
 model SupplyRequest {
@@ -368,7 +251,7 @@ model SupplyRequest {
   requestNumber   String   @unique
   vehicleId       String
   requestedById   String
-  status          SupplyRequestStatus @default(PENDING)
+  status          String   @default("PENDING")
   priority        String
   notes           String?
   approvedById    String?
@@ -376,11 +259,6 @@ model SupplyRequest {
   fulfilledAt     DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-
-  vehicle         Vehicle  @relation(fields: [vehicleId], references: [id])
-  requestedBy     User     @relation("RequestedByUser", fields: [requestedById], references: [id])
-  approvedBy      User?    @relation("ApprovedByUser", fields: [approvedById], references: [id])
-  items           SupplyRequestItem[]
 }
 
 model SupplyRequestItem {
@@ -389,9 +267,6 @@ model SupplyRequestItem {
   supplyId        String
   requestedQuantity Float
   fulfilledQuantity Float?
-
-  request         SupplyRequest @relation(fields: [requestId], references: [id])
-  supply          MedicalSupply @relation(fields: [supplyId], references: [id])
 }
 
 model QualityReport {
@@ -405,7 +280,7 @@ model QualityReport {
   hospitalDecisionAccuracy Float
   criticalResponseWithinTarget Float
   onTimeDelivery  Float
-  data            Json
+  data            String
   generatedAt     DateTime @default(now())
   exportedAt      DateTime?
 
@@ -417,7 +292,7 @@ model Notification {
   type            String
   title           String
   content         String
-  recipientRole   UserRole?
+  recipientRole   String?
   recipientUserId String?
   dispatchId      String?
   isRead          Boolean  @default(false)

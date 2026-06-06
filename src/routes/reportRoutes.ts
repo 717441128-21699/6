@@ -7,7 +7,7 @@ import {
   getStatisticsOverview,
 } from '../controllers/reportController';
 import { protect, requireRoles } from '../middleware/auth';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../utils/enums';
 
 const router = Router();
 

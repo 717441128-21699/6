@@ -5,7 +5,7 @@ import { AppError } from '../middleware/errorHandler';
 import {
   DispatchStatus,
   EmergencyLevel,
-} from '@prisma/client';
+} from '../utils/enums';
 import ExcelJS from 'exceljs';
 
 interface DispatchMetrics {
@@ -69,21 +69,22 @@ async function generateMonthlyReport(
     status: DispatchStatus.COMPLETED,
   };
 
-  if (stationId) {
-    where.vehicle = { stationId };
-  }
-
   if (teamId) {
     where.assignedTeamId = teamId;
   }
 
-  const dispatches = await prisma.dispatch.findMany({
+  let dispatches = await prisma.dispatch.findMany({
     where,
-    include: {
-      call: true,
-      vehicle: { include: { station: true } },
-    },
   });
+
+  if (stationId) {
+    const vehiclesAtStation = await prisma.vehicle.findMany({
+      where: { stationId },
+      select: { id: true },
+    });
+    const vehicleIds = vehiclesAtStation.map((v) => v.id);
+    dispatches = dispatches.filter((d) => vehicleIds.includes(d.vehicleId));
+  }
 
   if (dispatches.length === 0) {
     return {
@@ -96,18 +97,37 @@ async function generateMonthlyReport(
       hospitalDecisionAccuracy: 0,
       criticalResponseWithinTarget: 0,
       onTimeDelivery: 0,
-      data: {},
+      data: JSON.stringify({}),
     };
   }
 
-  const metrics = dispatches.map(calculateDispatchMetrics);
+  const callsMap = new Map<string, any>();
+  const vehiclesMap = new Map<string, any>();
+  for (const d of dispatches) {
+    if (d.callId && !callsMap.has(d.callId)) {
+      const call = await prisma.emergencyCall.findUnique({ where: { id: d.callId } });
+      if (call) callsMap.set(d.callId, call);
+    }
+    if (d.vehicleId && !vehiclesMap.has(d.vehicleId)) {
+      const vehicle = await prisma.vehicle.findUnique({ where: { id: d.vehicleId } });
+      if (vehicle) vehiclesMap.set(d.vehicleId, vehicle);
+    }
+  }
+
+  const enrichedDispatches = dispatches.map((d) => ({
+    ...d,
+    call: callsMap.get(d.callId),
+    vehicle: vehiclesMap.get(d.vehicleId),
+  }));
+
+  const metrics = enrichedDispatches.map(calculateDispatchMetrics);
 
   const validResponseTimes = metrics.filter((m) => m.responseTime > 0);
   const validSceneTimes = metrics.filter((m) => m.sceneTime > 0);
   const validDecisions = metrics.filter((m) => m.hospitalDecisionCorrect);
   const validDeliveries = metrics.filter((m) => m.onTimeDelivery);
 
-  const criticalDispatches = dispatches.filter(
+  const criticalDispatches = enrichedDispatches.filter(
     (d) => d.level === EmergencyLevel.CRITICAL
   );
   const criticalMetrics = criticalDispatches.map(calculateDispatchMetrics);
@@ -138,14 +158,14 @@ async function generateMonthlyReport(
 
   const levelBreakdown: Record<string, number> = {};
   Object.values(EmergencyLevel).forEach((level) => {
-    levelBreakdown[level] = dispatches.filter((d) => d.level === level).length;
+    levelBreakdown[level] = enrichedDispatches.filter((d) => d.level === level).length;
   });
 
   return {
     reportMonth: `${year}-${String(month).padStart(2, '0')}`,
     stationId: stationId || null,
     teamId: teamId || null,
-    totalCalls: dispatches.length,
+    totalCalls: enrichedDispatches.length,
     avgResponseTime: parseFloat(avgResponseTime.toFixed(2)),
     avgSceneTime: parseFloat(avgSceneTime.toFixed(2)),
     hospitalDecisionAccuracy: parseFloat(hospitalDecisionAccuracy.toFixed(2)),
@@ -153,17 +173,17 @@ async function generateMonthlyReport(
       criticalResponseWithinTarget.toFixed(2)
     ),
     onTimeDelivery: parseFloat(onTimeDeliveryRate.toFixed(2)),
-    data: {
+    data: JSON.stringify({
       levelBreakdown,
       criticalCalls: criticalDispatches.length,
       criticalOnTime: criticalOnTime.length,
-      dispatches: dispatches.map((d, i) => ({
+      dispatches: enrichedDispatches.map((d, i) => ({
         id: d.id,
         callNumber: d.call?.callNumber,
         level: d.level,
         ...metrics[i],
       })),
-    },
+    }),
   };
 }
 
@@ -197,7 +217,7 @@ export const generateReport = asyncHandler(
         hospitalDecisionAccuracy: reportData.hospitalDecisionAccuracy,
         criticalResponseWithinTarget: reportData.criticalResponseWithinTarget,
         onTimeDelivery: reportData.onTimeDelivery,
-        data: reportData.data as any,
+        data: reportData.data,
       },
       create: {
         reportMonth: reportData.reportMonth,
@@ -209,17 +229,27 @@ export const generateReport = asyncHandler(
         hospitalDecisionAccuracy: reportData.hospitalDecisionAccuracy,
         criticalResponseWithinTarget: reportData.criticalResponseWithinTarget,
         onTimeDelivery: reportData.onTimeDelivery,
-        data: reportData.data as any,
-      },
-      include: {
-        station: true,
-        team: true,
+        data: reportData.data,
       },
     });
 
+    const station = report.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: report.stationId } })
+      : null;
+    const team = report.teamId
+      ? await prisma.emergencyTeam.findUnique({ where: { id: report.teamId } })
+      : null;
+
     res.status(200).json({
       status: 'success',
-      data: { report },
+      data: {
+        report: {
+          ...report,
+          data: JSON.parse(report.data || '{}'),
+          station,
+          team,
+        },
+      },
     });
   }
 );
@@ -230,16 +260,29 @@ export const getReport = asyncHandler(
 
     const report = await prisma.qualityReport.findUnique({
       where: { id },
-      include: { station: true, team: true },
     });
 
     if (!report) {
       return next(new AppError('报告不存在', 404));
     }
 
+    const station = report.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: report.stationId } })
+      : null;
+    const team = report.teamId
+      ? await prisma.emergencyTeam.findUnique({ where: { id: report.teamId } })
+      : null;
+
     res.status(200).json({
       status: 'success',
-      data: { report },
+      data: {
+        report: {
+          ...report,
+          data: JSON.parse(report.data || '{}'),
+          station,
+          team,
+        },
+      },
     });
   }
 );
@@ -255,14 +298,30 @@ export const listReports = asyncHandler(
 
     const reports = await prisma.qualityReport.findMany({
       where,
-      include: { station: true, team: true },
       orderBy: { reportMonth: 'desc' },
       take: 50,
     });
 
+    const enrichedReports = await Promise.all(
+      reports.map(async (r) => {
+        const station = r.stationId
+          ? await prisma.emergencyStation.findUnique({ where: { id: r.stationId } })
+          : null;
+        const team = r.teamId
+          ? await prisma.emergencyTeam.findUnique({ where: { id: r.teamId } })
+          : null;
+        return {
+          ...r,
+          data: JSON.parse(r.data || '{}'),
+          station,
+          team,
+        };
+      })
+    );
+
     res.status(200).json({
       status: 'success',
-      data: { reports },
+      data: { reports: enrichedReports },
     });
   }
 );
@@ -273,12 +332,25 @@ export const exportReportToExcel = asyncHandler(
 
     const report = await prisma.qualityReport.findUnique({
       where: { id },
-      include: { station: true, team: true },
     });
 
     if (!report) {
       return next(new AppError('报告不存在', 404));
     }
+
+    const station = report.stationId
+      ? await prisma.emergencyStation.findUnique({ where: { id: report.stationId } })
+      : null;
+    const team = report.teamId
+      ? await prisma.emergencyTeam.findUnique({ where: { id: report.teamId } })
+      : null;
+
+    const enrichedReport = {
+      ...report,
+      data: JSON.parse(report.data || '{}'),
+      station,
+      team,
+    };
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = '智慧急救调度系统';
@@ -292,19 +364,19 @@ export const exportReportToExcel = asyncHandler(
     ];
 
     summarySheet.addRows([
-      { metric: '报告月份', value: report.reportMonth },
-      { metric: '急救站', value: report.station?.name || '全部' },
-      { metric: '急救小组', value: report.team?.name || '全部' },
-      { metric: '总出车次数', value: report.totalCalls },
-      { metric: '平均响应时间(分钟)', value: report.avgResponseTime },
-      { metric: '平均现场处置时间(分钟)', value: report.avgSceneTime },
-      { metric: '医院决策准确率(%)', value: report.hospitalDecisionAccuracy },
+      { metric: '报告月份', value: enrichedReport.reportMonth },
+      { metric: '急救站', value: enrichedReport.station?.name || '全部' },
+      { metric: '急救小组', value: enrichedReport.team?.name || '全部' },
+      { metric: '总出车次数', value: enrichedReport.totalCalls },
+      { metric: '平均响应时间(分钟)', value: enrichedReport.avgResponseTime },
+      { metric: '平均现场处置时间(分钟)', value: enrichedReport.avgSceneTime },
+      { metric: '医院决策准确率(%)', value: enrichedReport.hospitalDecisionAccuracy },
       {
         metric: '危重病例响应达标率(%)',
-        value: report.criticalResponseWithinTarget,
+        value: enrichedReport.criticalResponseWithinTarget,
       },
-      { metric: '准时送达率(%)', value: report.onTimeDelivery },
-      { metric: '报告生成时间', value: report.generatedAt.toLocaleString() },
+      { metric: '准时送达率(%)', value: enrichedReport.onTimeDelivery },
+      { metric: '报告生成时间', value: enrichedReport.generatedAt.toLocaleString() },
     ]);
 
     summarySheet.getRow(1).font = { bold: true };
@@ -314,7 +386,7 @@ export const exportReportToExcel = asyncHandler(
       fgColor: { argb: 'FFE0E0E0' },
     };
 
-    const data: any = report.data as any;
+    const data: any = enrichedReport.data as any;
     if (data?.dispatches && data.dispatches.length > 0) {
       const detailSheet = workbook.addWorksheet('出车明细');
 
@@ -378,8 +450,8 @@ export const exportReportToExcel = asyncHandler(
       };
     }
 
-    const fileName = `急救质量报告_${report.reportMonth}_${
-      report.station?.name || '全部'
+    const fileName = `急救质量报告_${enrichedReport.reportMonth}_${
+      enrichedReport.station?.name || '全部'
     }.xlsx`;
 
     res.setHeader(
@@ -409,7 +481,6 @@ export const getStatisticsOverview = asyncHandler(
       status: DispatchStatus.COMPLETED,
     };
 
-    if (stationId) where.vehicle = { stationId: stationId as string };
     if (teamId) where.assignedTeamId = teamId as string;
     if (dateFrom || dateTo) {
       where.createdAt = {};
@@ -417,7 +488,19 @@ export const getStatisticsOverview = asyncHandler(
       if (dateTo) where.createdAt.lte = new Date(dateTo as string);
     }
 
-    const totalCompleted = await prisma.dispatch.count({ where });
+    let totalCompletedQuery = prisma.dispatch.count({ where });
+    if (stationId) {
+      const vehiclesAtStation = await prisma.vehicle.findMany({
+        where: { stationId: stationId as string },
+        select: { id: true },
+      });
+      const vehicleIds = vehiclesAtStation.map((v) => v.id);
+      totalCompletedQuery = prisma.dispatch.count({
+        where: { ...where, vehicleId: { in: vehicleIds } },
+      });
+    }
+
+    const totalCompleted = await totalCompletedQuery;
 
     const activeDispatches = await prisma.dispatch.count({
       where: {

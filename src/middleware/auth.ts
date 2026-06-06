@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import asyncHandler from 'express-async-handler';
 import prisma from '../config/prisma';
 import { AppError } from './errorHandler';
-import { UserRole } from '@prisma/client';
+import { UserRole } from '../utils/enums';
 
 interface JwtPayload {
   id: string;
