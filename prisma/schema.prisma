@@ -1,0 +1,358 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  DISPATCHER
+  PARAMEDIC
+  DOCTOR
+  HOSPITAL_STAFF
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  ON_CALL
+  ON_ROUTE
+  AT_SCENE
+  TRANSPORTING
+  AT_HOSPITAL
+  RETURNING
+  MAINTENANCE
+  OUT_OF_SERVICE
+}
+
+enum EmergencyLevel {
+  CRITICAL
+  SEVERE
+  MODERATE
+  MINOR
+}
+
+enum DispatchStatus {
+  PENDING
+  ASSIGNED
+  ACCEPTED
+  EN_ROUTE_TO_SCENE
+  AT_SCENE
+  EN_ROUTE_TO_HOSPITAL
+  AT_HOSPITAL
+  COMPLETED
+  CANCELLED
+}
+
+enum AlertSeverity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+enum AlertStatus {
+  PENDING
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum SupplyRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  FULFILLED
+}
+
+model User {
+  id              String   @id @default(cuid())
+  username        String   @unique
+  passwordHash    String
+  fullName        String
+  role            UserRole
+  phone           String?
+  email           String?  @unique
+  stationId       String?
+  teamId          String?
+  hospitalId      String?
+  department      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  isActive        Boolean  @default(true)
+}
+
+model EmergencyStation {
+  id            String   @id @default(cuid())
+  name          String
+  code          String   @unique
+  address       String
+  latitude      Float
+  longitude     Float
+  contactPhone  String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model EmergencyTeam {
+  id            String   @id @default(cuid())
+  name          String
+  code          String   @unique
+  stationId     String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Vehicle {
+  id              String   @id @default(cuid())
+  plateNumber     String   @unique
+  vehicleType     String
+  status          VehicleStatus @default(AVAILABLE)
+  stationId       String
+  currentTeamId   String?
+  currentLatitude Float?
+  currentLongitude Float?
+  lastLocationUpdate DateTime?
+  currentDispatchId String?
+  fuelLevel       Float    @default(100)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Hospital {
+  id              String   @id @default(cuid())
+  name            String
+  address         String
+  latitude        Float
+  longitude       Float
+  contactPhone    String
+  hasER           Boolean  @default(true)
+  erBedsTotal     Int      @default(0)
+  erBedsOccupied  Int      @default(0)
+  erDoctorsOnDuty Int      @default(0)
+  erLoadLevel     Float    @default(0)
+  lastLoadUpdate  DateTime?
+  specialties     String[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model HospitalDepartment {
+  id            String   @id @default(cuid())
+  hospitalId    String
+  name          String
+  contactPhone  String?
+  available     Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model EmergencyCall {
+  id              String   @id @default(cuid())
+  callNumber      String   @unique
+  callerName      String?
+  callerPhone     String
+  patientName     String?
+  patientAge      Int?
+  patientGender   String?
+  locationAddress String
+  locationLatitude Float
+  locationLongitude Float
+  chiefComplaint  String
+  symptoms        String[]
+  emergencyLevel  EmergencyLevel
+  callTime        DateTime
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Dispatch {
+  id              String   @id @default(cuid())
+  callId          String   @unique
+  status          DispatchStatus @default(PENDING)
+  level           EmergencyLevel
+  dispatcherId    String
+  vehicleId       String
+  assignedTeamId  String?
+  assignedDoctorId String?
+  acceptedAt      DateTime?
+  enRouteAt       DateTime?
+  sceneArrivalAt  DateTime?
+  hospitalDepartAt DateTime?
+  hospitalArrivalAt DateTime?
+  completedAt     DateTime?
+  handoverTime    DateTime?
+  recommendedHospitalId String?
+  actualHospitalId    String?
+  dispatchNotes   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Patient {
+  id              String   @id @default(cuid())
+  callId          String   @unique
+  dispatchId      String?  @unique
+  fullName        String?
+  age             Int?
+  gender          String?
+  idNumber        String?
+  contactPhone    String?
+  medicalHistory  String?
+  allergies       String?
+  currentMedications String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model VitalSign {
+  id              String   @id @default(cuid())
+  dispatchId      String
+  timestamp       DateTime
+  heartRate       Int?
+  systolicBP      Int?
+  diastolicBP     Int?
+  oxygenSaturation Float?
+  respiratoryRate Int?
+  temperature     Float?
+  ecgData         String?
+  consciousness   String?
+  isAbnormal      Boolean  @default(false)
+  notes           String?
+  createdAt       DateTime @default(now())
+}
+
+model Alert {
+  id              String   @id @default(cuid())
+  type            String
+  severity        AlertSeverity
+  status          AlertStatus @default(PENDING)
+  dispatchId      String?
+  vitalSignId     String?
+  message         String
+  diagnosisSuggestion String?
+  acknowledgedAt  DateTime?
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model AlertRecipient {
+  id              String   @id @default(cuid())
+  alertId         String
+  userId          String
+  readAt          DateTime?
+  notifiedAt      DateTime @default(now())
+
+  @@unique([alertId, userId])
+}
+
+model MedicalRecord {
+  id              String   @id @default(cuid())
+  dispatchId      String   @unique
+  patientId       String?
+  chiefComplaint  String
+  historyOfPresentIllness String?
+  physicalExamination String?
+  vitalSignsSummary String?
+  fieldDiagnosis  String
+  treatmentProvided String
+  medicationsGiven String?
+  proceduresPerformed String?
+  patientConditionAtHandover String
+  handoverToHospitalStaff String
+  handoverStaffName String
+  syncedToHospital Boolean @default(false)
+  syncedAt        DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model MedicalSupply {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  category        String
+  unit            String
+  safetyStock     Float
+  defaultQuantityPerVehicle Float
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model VehicleSupply {
+  id              String   @id @default(cuid())
+  vehicleId       String
+  supplyId        String
+  quantity        Float
+  lastRefilledAt  DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([vehicleId, supplyId])
+}
+
+model DispatchSupplyUsage {
+  id              String   @id @default(cuid())
+  dispatchId      String
+  supplyId        String
+  quantityUsed    Float
+  notes           String?
+  createdAt       DateTime @default(now())
+}
+
+model SupplyRequest {
+  id              String   @id @default(cuid())
+  requestNumber   String   @unique
+  vehicleId       String
+  requestedById   String
+  status          SupplyRequestStatus @default(PENDING)
+  priority        String
+  notes           String?
+  approvedById    String?
+  approvedAt      DateTime?
+  fulfilledAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SupplyRequestItem {
+  id              String   @id @default(cuid())
+  requestId       String
+  supplyId        String
+  requestedQuantity Float
+  fulfilledQuantity Float?
+}
+
+model QualityReport {
+  id              String   @id @default(cuid())
+  reportMonth     String
+  stationId       String?
+  teamId          String?
+  totalCalls      Int      @default(0)
+  avgResponseTime Float
+  avgSceneTime    Float
+  hospitalDecisionAccuracy Float
+  criticalResponseWithinTarget Float
+  onTimeDelivery  Float
+  data            Json
+  generatedAt     DateTime @default(now())
+  exportedAt      DateTime?
+
+  @@unique([reportMonth, stationId, teamId])
+}
+
+model Notification {
+  id              String   @id @default(cuid())
+  type            String
+  title           String
+  content         String
+  recipientRole   UserRole?
+  recipientUserId String?
+  dispatchId      String?
+  isRead          Boolean  @default(false)
+  createdAt       DateTime @default(now())
+}
